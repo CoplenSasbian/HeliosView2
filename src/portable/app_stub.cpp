@@ -1,10 +1,9 @@
-#include "../abi/app_factory.h"
+﻿#include "../AppBackend.h"
 
 namespace helios::detail {
 
-abi::status create_platform_app(const app_options&, app** out) noexcept {
-    if (out != nullptr) *out = nullptr;
-    return abi::unsupported;
+std::unique_ptr<app> create_platform_app(const app_options&) {
+    throw make_error(unsupported, "create_app", "this build has no windowing backend");
 }
 
 }  // namespace helios::detail

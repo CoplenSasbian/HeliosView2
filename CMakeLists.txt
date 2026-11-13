@@ -32,11 +32,35 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(HeliosReflection)
 include(HeliosHelpers)
 include(HeliosExecution)
+include(HeliosJson)
 include(HeliosTests)
 
-add_library(${PROJECT_NAME} SHARED
+# A shared library keeps the ABI boundary; a static one removes it entirely.
+# The wire format in include/HeliosView2/abi/ and the header-side C++ layer are
+# the same either way, so an application can start static and switch later.
+option(HELIOS_BUILD_SHARED "Build ${PROJECT_NAME} as a shared library" ON)
+if(HELIOS_BUILD_SHARED)
+    set(HELIOS_LIBRARY_TYPE SHARED)
+else()
+    set(HELIOS_LIBRARY_TYPE STATIC)
+endif()
+
+# Binary compatibility: the exported API is ordinary C++ (std::string, std::expected,
+# interface classes), so a binary only works with the exact headers, compiler and
+# flags it was built with. That is the intended trade: ship one binary per
+# toolchain instead of freezing an ABI. HELIOS_BUILD_SHARED=OFF removes the
+# boundary entirely by linking statically.
+add_library(${PROJECT_NAME} ${HELIOS_LIBRARY_TYPE}
         src/${PROJECT_NAME}.cpp
+        src/App.cpp
+        src/Error.cpp
+        src/Log.cpp
         src/abi/app_factory.cpp)
+
+if(NOT HELIOS_BUILD_SHARED)
+    # Turns HELIOSVIEW2_EXPORT into nothing for every consumer of the headers.
+    target_compile_definitions(${PROJECT_NAME} PUBLIC HELIOSVIEW2_STATIC_BUILD)
+endif()
 
 if(WIN32)
     target_sources(${PROJECT_NAME} PRIVATE
@@ -54,8 +78,18 @@ helios_apply_cxx26(${PROJECT_NAME})
 # Public: Execution.h is part of the installed interface.
 target_link_libraries(${PROJECT_NAME} PUBLIC helios_exec)
 
+# JSON (glaze) is a build-time dependency: no public header exposes it, so other
+# targets link helios_json themselves when they need it.
+helios_link_json(${PROJECT_NAME})
+
 target_compile_definitions(${PROJECT_NAME} PRIVATE
         HELIOSVIEW2_VERSION="${PROJECT_VERSION}")
+
+# Log patterns print a source file relative to the project root, so the root is
+# baked into the build interface. Consumers of an installed package fall back to
+# the absolute path recorded by the compiler.
+target_compile_definitions(${PROJECT_NAME} PUBLIC
+        $<BUILD_INTERFACE:HELIOS_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}">)
 
 set(HELIOS_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 include(GenerateExportHeader)

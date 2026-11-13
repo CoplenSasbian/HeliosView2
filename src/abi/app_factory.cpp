@@ -1,12 +1,11 @@
-#include "app_factory.h"
+﻿#include "../AppBackend.h"
+
+#include <HeliosView2/App.h>
 
 namespace helios {
 
-extern "C" HELIOSVIEW2_EXPORT abi::status HELIOS_CALL
-create_app(const app_options* options, app** out) noexcept {
-    if (options == nullptr || out == nullptr) return abi::invalid_argument;
-    *out = nullptr;
-    return detail::create_platform_app(*options, out);
+std::unique_ptr<app> create_app(const app_options& options) {
+    return detail::create_platform_app(options);
 }
 
 }  // namespace helios

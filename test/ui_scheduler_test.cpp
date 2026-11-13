@@ -1,22 +1,20 @@
-#include <HeliosView2/Execution.h>
+﻿#include <HeliosView2/Execution.h>
 #include <HeliosView2/UiScheduler.h>
+
+#include "test_support.h"
 
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <cstdint>
 #include <thread>
 #include <tuple>
 
-namespace abi = helios::abi;
 namespace ex = helios::exec;
 
 #if defined(_WIN32)
 TEST_CASE("ui_scheduler delivers values on the ui thread") {
-    helios::app_options options{};
-    abi::ptr<helios::app> application;
-
-    REQUIRE(abi::succeeded(helios::create_app(&options, std::out_ptr(application))));
-    REQUIRE(application != nullptr);
+    std::unique_ptr<helios::app> application = test_support::app();
 
     const std::thread::id ui_thread = std::this_thread::get_id();
     std::atomic<bool> on_ui{false};
@@ -40,7 +38,7 @@ TEST_CASE("ui_scheduler delivers values on the ui thread") {
     });
 
     std::int32_t exit_code = -1;
-    CHECK(abi::succeeded(application->run(&exit_code)));
+    CHECK_NOTHROW(application->run(exit_code));
     worker.join();
 
     CHECK(completed.load());

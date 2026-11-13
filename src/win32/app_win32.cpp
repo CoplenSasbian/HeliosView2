@@ -1,6 +1,5 @@
-#include "../abi/app_factory.h"
+﻿#include "../AppBackend.h"
 #include "win32_window.h"
-#include <HeliosView2/Task.h>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -11,37 +10,28 @@
 #include <windows.h>
 #include <objbase.h>
 
-#include <algorithm>
-#include <atomic>
-#include <cstddef>
-#include <cstdint>
 #include <deque>
+#include <exception>
+#include <functional>
+#include <memory>
 #include <mutex>
-#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
-namespace helios {
+namespace helios::detail {
 
 namespace {
 
 constexpr UINT kTaskMessage = WM_APP + 1;
 
-bool valid_field(const char* data, std::size_t size) noexcept {
-    return size == 0 || data != nullptr;
-}
-
-std::string copy_field(const char* data, std::size_t size) {
-    if (data == nullptr || size == 0) return {};
-    return std::string(data, size);
-}
-
 std::wstring to_wide(const std::string& value) {
     if (value.empty()) return {};
+
     const int length = ::MultiByteToWideChar(CP_UTF8, 0, value.data(),
                                              static_cast<int>(value.size()), nullptr, 0);
     if (length <= 0) return {};
+
     std::wstring result(static_cast<std::size_t>(length), L'\0');
     ::MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
                           result.data(), length);
@@ -81,29 +71,59 @@ void set_app_user_model_id(const std::string& id) {
     if (set_aumid != nullptr) set_aumid(wide.c_str());
 }
 
+std::string hresult_text(HRESULT result) {
+    wchar_t* buffer = nullptr;
+    const DWORD length = ::FormatMessageW(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
+                    | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr, static_cast<DWORD>(result), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            reinterpret_cast<wchar_t*>(&buffer), 0, nullptr);
+
+    std::string text;
+    if (length != 0 && buffer != nullptr) {
+        const int size = ::WideCharToMultiByte(CP_UTF8, 0, buffer, static_cast<int>(length),
+                                               nullptr, 0, nullptr, nullptr);
+        if (size > 0) {
+            text.resize(static_cast<std::size_t>(size));
+            ::WideCharToMultiByte(CP_UTF8, 0, buffer, static_cast<int>(length), text.data(),
+                                  size, nullptr, nullptr);
+        }
+    }
+    if (buffer != nullptr) ::LocalFree(buffer);
+
+    while (!text.empty() && (text.back() == '\r' || text.back() == '\n' || text.back() == ' ')) {
+        text.pop_back();
+    }
+
+    char digits[16]{};
+    std::snprintf(digits, sizeof(digits), "0x%08lX", static_cast<unsigned long>(result));
+    std::string suffix = " (error ";
+    suffix += digits;
+    if (!text.empty()) {
+        suffix += ": ";
+        suffix += text;
+    }
+    suffix += ')';
+    return suffix;
+}
+
 }  // namespace
 
-class win32_app final : public app, private win32_window_host {
+class win32_app_impl final : public app_impl {
 public:
-    explicit win32_app(const app_options& options)
-        : m_thread_id(::GetCurrentThreadId()) {
-        if (!valid_field(options.id, options.id_size)
-            || !valid_field(options.name, options.name_size)
-            || !valid_field(options.version, options.version_size)) {
-            m_init_status = abi::invalid_argument;
-            return;
-        }
-
-        m_id = copy_field(options.id, options.id_size);
-        m_name = copy_field(options.name, options.name_size);
-        m_version = copy_field(options.version, options.version_size);
-        m_quit_on_last_window_closed = options.quit_on_last_window_closed != 0;
-
+    explicit win32_app_impl(const app_options& options)
+        : m_thread_id(::GetCurrentThreadId()),
+          m_quit_on_last_window_closed(options.quit_on_last_window_closed),
+          m_id(options.id),
+          m_name(options.name),
+          m_version(options.version){
         set_dpi_awareness();
 
         const HRESULT result = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         if (FAILED(result)) {
-            m_init_status = abi::unsupported;
+            m_init_error = make_error_text(
+                    platform_failure, "initialising COM on the UI thread",
+                    "CoInitializeEx failed" + hresult_text(result));
             return;
         }
         m_com_initialized = true;
@@ -114,56 +134,38 @@ public:
         ::PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
     }
 
-    ~win32_app() {
+    ~win32_app_impl() override {
         close_all_windows();
         discard_tasks();
         if (m_com_initialized) ::CoUninitialize();
     }
 
-    abi::status init_status() const noexcept { return m_init_status; }
+    [[nodiscard]] const error& init_error() const noexcept { return m_init_error; }
 
-    std::uint32_t add_ref() noexcept override { return ++m_refs; }
-
-    std::uint32_t release() noexcept override {
-        const auto remaining = --m_refs;
-        if (remaining == 0) delete this;
-        return remaining;
-    }
-
-    abi::status query_interface(const abi::guid& id, void** out) noexcept override {
-        if (out == nullptr) return abi::invalid_argument;
-        *out = nullptr;
-
-        if (id == app::iid) {
-            *out = static_cast<app*>(this);
-            add_ref();
-            return abi::ok;
+    void run(std::int32_t& exit_code) override {
+        if (::GetCurrentThreadId() != m_thread_id) {
+            throw make_error(
+                    wrong_thread, "running the message loop",
+                    "run must be called from the thread that created the app");
         }
-        if (id == abi::unknown_iid) {
-            *out = static_cast<abi::unknown*>(this);
-            add_ref();
-            return abi::ok;
+        if (m_started.exchange(true)) {
+            throw make_error(invalid_state, "running the message loop",
+                                              "the message loop is already running");
         }
-        return abi::no_interface;
-    }
-
-    abi::status run(std::int32_t* exit_code) noexcept override {
-        if (::GetCurrentThreadId() != m_thread_id) return abi::wrong_thread;
-        if (m_started.exchange(true)) return abi::invalid_argument;
 
         bool expected = false;
         if (!m_running.compare_exchange_strong(expected, true)) {
             m_stopped.store(true, std::memory_order_release);
-            return abi::invalid_argument;
+            throw make_error(invalid_state, "running the message loop",
+                         "the message loop has already finished");
         }
 
-        if (exit_code != nullptr) *exit_code = 0;
+        exit_code = 0;
 
         if (m_quit_requested.exchange(false)) {
             discard_tasks();
-            m_running.store(false, std::memory_order_release);
-            m_stopped.store(true, std::memory_order_release);
-            return abi::ok;
+            finish();
+            return;
         }
 
         drain_tasks();
@@ -172,13 +174,15 @@ public:
         for (;;) {
             const BOOL result = ::GetMessageW(&message, nullptr, 0, 0);
             if (result == -1) {
+                const auto native = static_cast<std::int32_t>(::GetLastError());
                 discard_tasks();
-                m_running.store(false, std::memory_order_release);
-                m_stopped.store(true, std::memory_order_release);
-                return abi::unsupported;
+                finish();
+                throw make_error_text(
+                        platform_failure, "pumping the message loop",
+                        "GetMessageW failed (error " + std::to_string(native) + ')');
             }
             if (result == 0) {
-                if (exit_code != nullptr) *exit_code = static_cast<std::int32_t>(message.wParam);
+                exit_code = static_cast<std::int32_t>(message.wParam);
                 break;
             }
             if (message.message == kTaskMessage) {
@@ -190,9 +194,8 @@ public:
         }
 
         discard_tasks();
-        m_running.store(false, std::memory_order_release);
-        m_stopped.store(true, std::memory_order_release);
-        return abi::ok;
+        finish();
+        return;
     }
 
     void quit() noexcept override {
@@ -202,76 +205,119 @@ public:
         }
     }
 
-    bool is_running() const noexcept override {
+    [[nodiscard]] bool is_running() const noexcept override {
         return m_running.load(std::memory_order_acquire);
     }
 
-    std::uint64_t ui_thread_id() const noexcept override {
+    [[nodiscard]] std::uint64_t ui_thread_id() const noexcept override {
         return static_cast<std::uint64_t>(m_thread_id);
     }
 
-    abi::status create_window(const abi::window_options* options, base_window** out) noexcept override {
-        if (out == nullptr) return abi::invalid_argument;
-        *out = nullptr;
-        if (options == nullptr) return abi::invalid_argument;
-        if (::GetCurrentThreadId() != m_thread_id) return abi::wrong_thread;
-
-        win32_window* raw = nullptr;
-        const abi::status status = win32_window::create(*this, *options, &raw);
-        if (abi::failed(status)) return status;
-
-        raw->add_ref();  // caller's reference
-        abi::ptr<win32_window> owned(raw);  // app's owning reference
-
-        try {
-            std::lock_guard<std::mutex> lock(m_windows_mutex);
-            m_windows.push_back(std::move(owned));
-        } catch (...) {
-            raw->release();
-            return abi::out_of_memory;
+    std::shared_ptr<base_window> create_window(const window_options& options) override {
+        if (::GetCurrentThreadId() != m_thread_id) {
+            throw make_error(wrong_thread, "creating a window",
+                                              "windows must be created on the UI thread");
         }
 
-        *out = static_cast<base_window*>(raw);
-        return abi::ok;
+        auto backend = win32_window_impl::create(*this, options);
+        auto handle = app_access::make_window(std::move(backend));
+
+        {
+            std::lock_guard lock(m_windows_mutex);
+            m_windows.push_back(handle);
+        }
+        return handle;
     }
 
-    std::uint64_t window_count() const noexcept override {
-        std::lock_guard<std::mutex> lock(m_windows_mutex);
+    [[nodiscard]] std::uint64_t window_count() const override {
+        std::lock_guard lock(m_windows_mutex);
         return static_cast<std::uint64_t>(m_windows.size());
     }
 
-    abi::status post(abi::task* work) noexcept override {
-        if (work == nullptr) return abi::invalid_argument;
-        if (m_stopped.load(std::memory_order_acquire)) return abi::invalid_argument;
+    void close_all_windows() override {
+        for (;;) {
+            std::shared_ptr<base_window> window;
+            {
+                std::lock_guard lock(m_windows_mutex);
+                if (m_windows.empty()) break;
+                window = m_windows.back();
+            }
 
-        work->add_ref();
+            // close() destroys the native window on this thread, and
+            // window_destroyed() drops it from the list.
+            try {
+                window->close();
+                continue;
+            } catch (const error&) {
+            }
+
+            // It could not be closed: drop our reference and stop the backend
+            // from calling back into an app that is going away.
+            std::lock_guard lock(m_windows_mutex);
+            for (auto it = m_windows.begin(); it != m_windows.end(); ++it) {
+                if (it->get() == window.get()) {
+                    if (window_impl* backend = app_access::impl_of(*window)) backend->detach();
+                    m_windows.erase(it);
+                    break;
+                }
+            }
+        }
+    }
+
+    void post(std::function<void()> work, std::function<void(error)> on_failure) override {
+        if (!work) {
+            throw make_error(invalid_argument, "posting a task",
+                                              "the task is empty");
+        }
+        if (m_stopped.load(std::memory_order_acquire)) {
+            throw make_error(invalid_state, "posting a task",
+                                              "the app has already stopped");
+        }
+
+        // A task runs later on the UI thread, so an exception has nobody to
+        // return to: catch it here and hand it to the caller's handler.
+        std::function<void()> item =
+                [work = std::move(work), on_failure = std::move(on_failure)]() mutable {
+                    try {
+                        work();
+                    } catch (const std::exception& failure) {
+                        if (on_failure) {
+                            on_failure(make_error(unhandled_exception,
+                                                  "running a posted task", "{}",
+                                                  failure.what()));
+                        }
+                    } catch (...) {
+                        if (on_failure) {
+                            on_failure(make_error(
+                                    unhandled_exception, "running a posted task",
+                                    "the task threw a value that is not an exception"));
+                        }
+                    }
+                };
+
         try {
-            std::lock_guard<std::mutex> lock(m_tasks_mutex);
-            m_tasks.emplace_back(work);
+            std::lock_guard lock(m_tasks_mutex);
+            m_tasks.push_back(std::move(item));
         } catch (...) {
-            work->release();
-            return abi::out_of_memory;
+            throw make_error(out_of_memory, "posting a task",
+                         "the task queue could not grow");
         }
 
         ::PostThreadMessageW(m_thread_id, kTaskMessage, 0, 0);
-        return abi::ok;
     }
 
-private:
-    void window_destroyed(win32_window& window) noexcept override {
-        abi::ptr<win32_window> removed;
-        bool empty = false;
+    void window_destroyed(window_impl& window) noexcept override {
+        // The handle keeps the window alive while this runs.
+        const std::shared_ptr<base_window> handle = window.lock_handle();
 
+        bool empty = false;
         {
-            std::lock_guard<std::mutex> lock(m_windows_mutex);
-            const auto it = std::find_if(
-                    m_windows.begin(), m_windows.end(),
-                    [&](const abi::ptr<win32_window>& item) {
-                        return item.get() == &window;
-                    });
-            if (it != m_windows.end()) {
-                removed = std::move(*it);
-                m_windows.erase(it);
+            std::lock_guard lock(m_windows_mutex);
+            for (auto it = m_windows.begin(); it != m_windows.end(); ++it) {
+                if (it->get() == handle.get()) {
+                    m_windows.erase(it);
+                    break;
+                }
             }
             empty = m_windows.empty();
         }
@@ -279,52 +325,40 @@ private:
         if (empty && m_quit_on_last_window_closed) quit();
     }
 
-    void close_all_windows() noexcept {
+private:
+    void finish() noexcept {
+        m_running.store(false, std::memory_order_release);
+        m_stopped.store(true, std::memory_order_release);
+    }
+
+    void drain_tasks() noexcept {
         for (;;) {
-            HWND hwnd = nullptr;
+            std::function<void()> item;
             {
-                std::lock_guard<std::mutex> lock(m_windows_mutex);
-                if (m_windows.empty()) break;
-                hwnd = m_windows.back()->hwnd();
+                std::lock_guard lock(m_tasks_mutex);
+                if (m_tasks.empty()) break;
+                item = std::move(m_tasks.front());
+                m_tasks.pop_front();
             }
-
-            if (hwnd != nullptr && ::DestroyWindow(hwnd)) continue;
-
-            abi::ptr<win32_window> stale;
-            {
-                std::lock_guard<std::mutex> lock(m_windows_mutex);
-                if (!m_windows.empty()) {
-                    stale = std::move(m_windows.back());
-                    m_windows.pop_back();
+            if (item) {
+                try {
+                    item();
+                } catch (...) {
                 }
             }
         }
     }
 
-    void drain_tasks() noexcept {
-        for (;;) {
-            abi::ptr<abi::task> item;
-            {
-                std::lock_guard<std::mutex> lock(m_tasks_mutex);
-                if (m_tasks.empty()) break;
-                item = std::move(m_tasks.front());
-                m_tasks.pop_front();
-            }
-            if (item != nullptr) item->run();
-        }
-    }
-
     void discard_tasks() noexcept {
-        std::deque<abi::ptr<abi::task>> pending;
+        std::deque<std::function<void()>> pending;
         {
-            std::lock_guard<std::mutex> lock(m_tasks_mutex);
+            std::lock_guard lock(m_tasks_mutex);
             pending.swap(m_tasks);
         }
     }
 
-    std::atomic<std::uint32_t> m_refs{1};
     DWORD m_thread_id{};
-    abi::status m_init_status{abi::ok};
+    error m_init_error;
     bool m_com_initialized{false};
     bool m_quit_on_last_window_closed{true};
     std::atomic<bool> m_running{false};
@@ -332,37 +366,29 @@ private:
     std::atomic<bool> m_stopped{false};
     std::atomic<bool> m_quit_requested{false};
     std::mutex m_tasks_mutex;
-    std::deque<abi::ptr<abi::task>> m_tasks;
+    std::deque<std::function<void()>> m_tasks;
     mutable std::mutex m_windows_mutex;
-    std::vector<abi::ptr<win32_window>> m_windows;
+    std::vector<std::shared_ptr<base_window>> m_windows;
     std::string m_id;
     std::string m_name;
     std::string m_version;
 };
 
-}  // namespace helios
-
-namespace helios::detail {
-
-abi::status create_platform_app(const app_options& options, app** out) noexcept {
-    if (out == nullptr) return abi::invalid_argument;
-    *out = nullptr;
-
-    win32_app* instance = nullptr;
+std::unique_ptr<app> create_platform_app(const app_options& options) {
     try {
-        instance = new win32_app(options);
-    } catch (...) {
-        return abi::out_of_memory;
+        auto backend = std::unique_ptr<win32_app_impl>(new win32_app_impl(options));
+        if (backend->init_error().valid()) {
+            const error failure = backend->init_error();
+            throw failure;
+        }
+        return app_access::make_app(std::move(backend));
+    } catch (const std::bad_alloc&) {
+        throw make_error(out_of_memory, "creating the application",
+                                          "the app object could not be allocated");
+    } catch (const std::exception& failure) {
+        throw make_error(out_of_memory, "creating the application", "{}",
+                                          failure.what());
     }
-
-    if (abi::failed(instance->init_status())) {
-        const abi::status status = instance->init_status();
-        instance->release();
-        return status;
-    }
-
-    *out = static_cast<app*>(instance);
-    return abi::ok;
 }
 
 }  // namespace helios::detail

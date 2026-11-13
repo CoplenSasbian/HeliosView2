@@ -1,48 +1,65 @@
-#pragma once
+﻿#pragma once
 
-// Window ABI. The public surface is a single abstract base_window class;
-// platform message handling stays behind the DLL boundary.
+// Public window interface.
+//
+// Like app: a handle over a pimpl that lives in the DLL, so the header stays small
+// and nothing platform specific leaks out.
 
-#include <HeliosView2/abi/object.h>
+#include <HeliosView2/App.h>
+#include <HeliosView2/HeliosView2_export.h>
 
-#include <cstddef>
 #include <cstdint>
-#include <limits>
-
-namespace helios::abi {
-
-struct window_options {
-    const char* title = nullptr;
-    std::size_t title_size = 0;
-
-    std::int32_t width = 800;
-    std::int32_t height = 600;
-    std::int32_t x = std::numeric_limits<std::int32_t>::min();
-    std::int32_t y = std::numeric_limits<std::int32_t>::min();
-
-    std::uint8_t resizable = 1;
-    std::uint8_t visible = 0;
-};
-
-}  // namespace helios::abi
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace helios {
 
-class base_window : public abi::unknown {
-public:
-    static constexpr abi::guid iid = abi::make_guid("helios.abi.window/1");
+namespace detail {
+class window_impl;
+}  // namespace detail
 
-    virtual abi::status show() noexcept = 0;
-    virtual abi::status hide() noexcept = 0;
-    virtual abi::status close() noexcept = 0;
-    virtual abi::status set_title(const char* utf8, std::size_t size) noexcept = 0;
-
-    [[nodiscard]] virtual bool is_closed() const noexcept = 0;
-    [[nodiscard]] virtual void* native_handle() const noexcept = 0;
-
-protected:
-    ~base_window() = default;
+/// The options a caller actually writes. An unset x/y lets the platform place
+/// the window.
+struct window_options {
+    std::string title;
+    std::int32_t width = 800;
+    std::int32_t height = 600;
+    std::optional<std::int32_t> x;
+    std::optional<std::int32_t> y;
+    bool resizable = true;
+    bool visible = false;
 };
 
-    
+class HELIOSVIEW2_EXPORT base_window {
+public:
+    base_window(const base_window&) = delete;
+    base_window& operator=(const base_window&) = delete;
+    ~base_window();
+
+    void show();
+    void hide();
+    void close();
+    void set_title(std::string_view title);
+    void set_should_close(bool should_close);
+    bool should_close() const;
+    [[nodiscard]] bool is_closed() const;
+    [[nodiscard]] void* native_handle() const;
+
+private:
+    friend struct detail::app_access;
+
+    explicit base_window(std::unique_ptr<detail::window_impl> impl) noexcept;
+
+    std::unique_ptr<detail::window_impl> m_impl;
+};
+
+/// Convenience for `application.create_window(options)`; throws on failure.
+[[nodiscard]] inline std::shared_ptr<base_window> create_window(
+        app& target, const window_options& options) {
+    return target.create_window(options);
+}
+
 }  // namespace helios

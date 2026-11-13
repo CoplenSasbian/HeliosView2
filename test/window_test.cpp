@@ -1,64 +1,48 @@
 #include <HeliosView2/App.h>
 #include <HeliosView2/Window.h>
 
+#include "test_support.h"
+
 #include <doctest/doctest.h>
 
-#include <cstring>
-
-namespace abi = helios::abi;
+#include <cstdint>
+#include <memory>
+#include <thread>
+#include <utility>
 
 #if defined(_WIN32)
 TEST_CASE("create_window creates a native window") {
-    helios::app_options app_options{};
-    abi::ptr<helios::app> application;
+    std::unique_ptr<helios::app> application = test_support::app();
 
-    REQUIRE(abi::succeeded(helios::create_app(&app_options, std::out_ptr(application))));
-    REQUIRE(application != nullptr);
-
-    abi::window_options options{};
-    options.title = "HeliosView2";
-    options.title_size = std::strlen(options.title);
-    options.width = 320;
-    options.height = 240;
-    options.visible = 0;
-    options.resizable = 1;
-
-    abi::ptr<helios::base_window> window;
-    REQUIRE(abi::succeeded(application->create_window(&options, std::out_ptr(window))));
+    std::shared_ptr<helios::base_window> window =
+            test_support::window(*application,
+                                 {.title = "HeliosView2", .width = 320, .height = 240});
     REQUIRE(window != nullptr);
 
     CHECK(application->window_count() == 1);
     CHECK(window->native_handle() != nullptr);
     CHECK_FALSE(window->is_closed());
 
-    CHECK(abi::succeeded(window->show()));
-    CHECK(abi::succeeded(window->hide()));
-    CHECK(abi::succeeded(window->set_title("Renamed", 7)));
+    CHECK_NOTHROW(window->show());
+    CHECK_NOTHROW(window->hide());
+    CHECK_NOTHROW(window->set_title("Renamed"));
 
-    CHECK(abi::succeeded(window->close()));
+    window->close();
     CHECK(window->is_closed());
     CHECK(window->native_handle() == nullptr);
     CHECK(application->window_count() == 0);
 
     // Closing the last window requests app shutdown (default option).
     std::int32_t exit_code = -1;
-    CHECK(abi::succeeded(application->run(&exit_code)));
+    CHECK_NOTHROW(application->run(exit_code));
     CHECK(exit_code == 0);
 }
 
-TEST_CASE("releasing app destroys open windows") {
-    helios::app_options app_options{};
-    abi::ptr<helios::app> application;
+TEST_CASE("a window outlives the app that created it") {
+    std::unique_ptr<helios::app> application = test_support::app();
 
-    REQUIRE(abi::succeeded(helios::create_app(&app_options, std::out_ptr(application))));
-    REQUIRE(application != nullptr);
-
-    abi::window_options options{};
-    options.title = "Lifetime";
-    options.title_size = std::strlen(options.title);
-
-    abi::ptr<helios::base_window> window;
-    REQUIRE(abi::succeeded(application->create_window(&options, std::out_ptr(window))));
+    std::shared_ptr<helios::base_window> window =
+            test_support::window(*application, {.title = "Lifetime"});
     REQUIRE(window != nullptr);
 
     application.reset();
@@ -66,5 +50,25 @@ TEST_CASE("releasing app destroys open windows") {
     CHECK(window->native_handle() == nullptr);
 
     window.reset();
+}
+
+TEST_CASE("window operations report the wrong thread") {
+    std::unique_ptr<helios::app> application = test_support::app();
+    std::shared_ptr<helios::base_window> window =
+            test_support::window(*application, {.title = "Thread"});
+    REQUIRE(window != nullptr);
+
+    std::thread worker([&] {
+        try {
+            window->show();
+            FAIL("show should have thrown");
+        } catch (const helios::error& failure) {
+            CHECK(failure.code() == helios::wrong_thread);
+            CHECK(failure.frame().context == "showing the window");
+        }
+    });
+    worker.join();
+
+    CHECK_NOTHROW(window->close());
 }
 #endif

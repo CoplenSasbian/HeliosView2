@@ -1,62 +1,83 @@
-#pragma once
+﻿#pragma once
 
-// Public application interface. Platform implementations live in the DLL; the
-// factory below is the only exported entry point.
+// Public application interface.
+//
+// The class is a handle: the platform implementation lives in the DLL behind a
+// pimpl (helios::detail::app_impl), so this header stays small, the class layout
+// can change without touching call sites, and app::run/quit are plain calls
+// rather than virtual dispatch. What does stay virtual is the part that genuinely
+// has several implementations - the platform backend inside the DLL.
+//
+// Plain C++ on purpose: the DLL exports ordinary classes and functions, so the
+// headers and the binary are built together with the same compiler, standard
+// library and flags. Ship a binary per toolchain rather than freeze an ABI.
 
+#include <HeliosView2/Error.h>
 #include <HeliosView2/HeliosView2_export.h>
-#include <HeliosView2/abi/object.h>
 
-#include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
 
 namespace helios {
 
-enum class activation_policy : std::int32_t {
-    regular = 0,
-    accessory = 1,
-    prohibited = 2,
-};
-
-struct app_options {
-    const char* id = nullptr;
-    std::size_t id_size = 0;
-    const char* name = nullptr;
-    std::size_t name_size = 0;
-    const char* version = nullptr;
-    std::size_t version_size = 0;
-    std::uint8_t quit_on_last_window_closed = 1;
-    activation_policy policy = activation_policy::regular;
-};
-
-namespace abi {
-struct window_options;
-class task;
-}
-
+struct window_options;  // Window.h
 class base_window;
+class app;
 
-class app : public abi::unknown {
-public:
-    static constexpr abi::guid iid = abi::make_guid("helios.abi.app/1");
+namespace detail {
+class app_impl;
+struct app_access;
+}  // namespace detail
 
-    virtual abi::status run(std::int32_t* exit_code) noexcept = 0;
-    virtual void quit() noexcept = 0;
-    [[nodiscard]] virtual bool is_running() const noexcept = 0;
-    [[nodiscard]] virtual std::uint64_t ui_thread_id() const noexcept = 0;
-    virtual abi::status create_window(const abi::window_options* options,
-                                      base_window** out) noexcept = 0;
-    [[nodiscard]] virtual std::uint64_t window_count() const noexcept = 0;
-
-    // Adds a reference while the task is queued. The caller keeps its own
-    // reference and may release it as soon as post returns.
-    virtual abi::status post(abi::task* work) noexcept = 0;
-
-protected:
-    ~app() = default;
+/// Options for creating an application.
+struct app_options {
+    std::string id;
+    std::string name;
+    std::string version;
+    bool quit_on_last_window_closed = true;
 };
 
-// No inline body: the implementation lives in the DLL.
-extern "C" HELIOSVIEW2_EXPORT abi::status HELIOS_CALL
-create_app(const app_options* options, app** out) noexcept;
+class HELIOSVIEW2_EXPORT app {
+public:
+    app(const app&) = delete;
+    app& operator=(const app&) = delete;
+    ~app();
+
+    /// Runs the message loop on the calling thread until quit() is requested.
+    void run(std::int32_t& exit_code);
+
+    void quit() noexcept;
+
+    [[nodiscard]] bool is_running() const noexcept;
+    [[nodiscard]] std::uint64_t ui_thread_id() const noexcept;
+
+    /// Creates a window; must be called on the UI thread.
+    std::shared_ptr<base_window> create_window(const window_options& options);
+
+    [[nodiscard]] std::uint64_t window_count() const;
+    void close_all_windows();
+
+    /// Queues work for the UI thread. `on_failure`, when set, receives what a
+    /// throwing task could not return.
+    void post(std::function<void()> work, std::function<void(error)> on_failure = {});
+
+private:
+    friend struct detail::app_access;
+
+    explicit app(std::unique_ptr<detail::app_impl> impl) noexcept;
+
+    std::unique_ptr<detail::app_impl> m_impl;
+};
+
+/// Creates an application; throws helios::error with the full detail on failure.
+///
+///     auto application = helios::create_app({.id = "com.example.editor",
+///                                           .name = "Editor",
+///                                           .version = "0.1.0"});
+[[nodiscard]] HELIOSVIEW2_EXPORT std::unique_ptr<app> create_app(
+        const app_options& options);
 
 }  // namespace helios

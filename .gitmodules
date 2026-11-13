@@ -4,3 +4,6 @@
 [submodule "thirdparty/stdexec"]
 	path = thirdparty/stdexec
 	url = https://github.com/NVIDIA/stdexec.git
+[submodule "thirdparty/glaze"]
+	path = thirdparty/glaze
+	url = https://github.com/stephenberry/glaze.git

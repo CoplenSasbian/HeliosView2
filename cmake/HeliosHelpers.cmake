@@ -4,7 +4,11 @@ function(helios_set_warnings target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive-)
     else()
-        target_compile_options(${target} PRIVATE -Wall -Wextra)
+        # Designated initializers that leave a member at its default are the
+        # intended style for the option structs (`window_options{.title = "x"}`),
+        # and -Wmissing-field-initializers fires on every one of them.
+        target_compile_options(${target} PRIVATE
+                -Wall -Wextra -Wno-missing-field-initializers)
     endif()
 endfunction()
 
