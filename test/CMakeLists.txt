@@ -1,6 +1,8 @@
-﻿# One executable per test source; main() comes from test/doctest_main.cpp.
+# One executable per test source; main() comes from test/doctest_main.cpp.
 helios_add_test(reflection_test)
 helios_apply_reflection(reflection_test)
+helios_add_test(handler_scanner_test)
+helios_apply_reflection(handler_scanner_test)
 helios_add_test(execution_test)
 helios_add_test(app_test)
 helios_add_test(ui_scheduler_test)

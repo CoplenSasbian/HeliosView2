@@ -1,6 +1,11 @@
 #pragma once
 
-
+// Window events.
+//
+// base_window (Window.h) turns platform messages into these plain structs. The
+// installed event handler receives an event_message that borrows the struct for
+// the duration of the call; HandlerScanner.h turns annotated member functions
+// into such a handler, so most windows never decode the message by hand.
 
 #include <cstddef>
 #include <cstdint>
@@ -15,7 +20,20 @@ enum class event_kind : std::uint16_t {
     mouse = 4,
     key = 5,
     paint = 6,
-    count = 7,
+    show = 7,
+    hide = 8,
+    minimize = 9,
+    maximize = 10,
+    restore = 11,
+    activate = 12,
+    text = 13,
+    mouse_leave = 14,
+    dpi = 15,
+    display_change = 16,
+    theme_change = 17,
+    settings_change = 18,
+    destroy = 19,
+    count = 20,
 };
 
 enum class mouse_button : std::uint32_t {
@@ -32,6 +50,7 @@ enum class mouse_action : std::uint32_t {
     down = 1,
     up = 2,
     wheel = 3,
+    double_click = 4,
 };
 
 enum class key_action : std::uint32_t {
@@ -67,6 +86,7 @@ struct close_event {
 struct resize_event {
     static constexpr event_kind kind = event_kind::resize;
 
+    /// Client area size; both are zero while the window is minimized.
     std::int32_t width = 0;
     std::int32_t height = 0;
 };
@@ -92,6 +112,7 @@ struct mouse_event {
     mouse_button button = mouse_button::none;
     mouse_action action = mouse_action::move;
     std::int32_t wheel_delta = 0;
+    std::int32_t horizontal_wheel_delta = 0;
     key_modifier modifiers = key_modifier::none;
 };
 
@@ -109,13 +130,94 @@ struct paint_event {
     static constexpr event_kind kind = event_kind::paint;
 };
 
+struct show_event {
+    static constexpr event_kind kind = event_kind::show;
+};
+
+struct hide_event {
+    static constexpr event_kind kind = event_kind::hide;
+};
+
+struct minimize_event {
+    static constexpr event_kind kind = event_kind::minimize;
+};
+
+struct maximize_event {
+    static constexpr event_kind kind = event_kind::maximize;
+};
+
+struct restore_event {
+    static constexpr event_kind kind = event_kind::restore;
+};
+
+struct activate_event {
+    static constexpr event_kind kind = event_kind::activate;
+
+    bool active = false;
+};
+
+/// A character produced by the keyboard, after TranslateMessage().
+struct text_event {
+    static constexpr event_kind kind = event_kind::text;
+
+    std::uint32_t codepoint = 0;
+};
+
+struct mouse_leave_event {
+    static constexpr event_kind kind = event_kind::mouse_leave;
+};
+
+/// The window moved to a different monitor or the monitor DPI changed; the
+/// suggested bounds are in physical pixels.
+struct dpi_event {
+    static constexpr event_kind kind = event_kind::dpi;
+
+    std::uint32_t dpi = 96;
+    std::int32_t x = 0;
+    std::int32_t y = 0;
+    std::int32_t width = 0;
+    std::int32_t height = 0;
+};
+
+struct display_change_event {
+    static constexpr event_kind kind = event_kind::display_change;
+
+    std::uint32_t bits_per_pixel = 0;
+    std::int32_t width = 0;
+    std::int32_t height = 0;
+};
+
+struct theme_change_event {
+    static constexpr event_kind kind = event_kind::theme_change;
+};
+
+/// WM_SETTINGCHANGE: `area` is the platform's subsystem mask (SPI_SETWORKAREA
+/// and friends).
+struct settings_change_event {
+    static constexpr event_kind kind = event_kind::settings_change;
+
+    std::uint32_t area = 0;
+};
+
+struct destroy_event {
+    static constexpr event_kind kind = event_kind::destroy;
+};
+
+/// One event, as handed to base_window::set_event_handler. `data` points at the
+/// matching event struct (resize_event, key_event, ...) and is only valid for
+/// the duration of the handler call; `size` is that struct's size.
 struct event_message {
     event_kind kind = event_kind::close;
     const void* data = nullptr;
     std::size_t size = 0;
 };
 
+/// Annotation marker for member functions that handler_scanner dispatches:
+///
+///     [[= helios::event_handler]]
+///     void on_resize(const helios::resize_event& event) { ... }
+struct event_handler_tag {};
 
-
+inline constexpr event_handler_tag event_handler{};
 
 }  // namespace helios

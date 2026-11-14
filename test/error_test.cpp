@@ -1,4 +1,4 @@
-﻿#include <HeliosView2/App.h>
+#include <HeliosView2/App.h>
 #include <HeliosView2/Error.h>
 #include <HeliosView2/Log.h>
 #include <HeliosView2/Window.h>
@@ -163,8 +163,8 @@ TEST_CASE("a failing call throws its detail") {
     std::thread worker([&] {
         // Windows must be created on the UI thread.
         try {
-            (void) application->create_window(options);
-            FAIL("create_window should have thrown");
+            helios::base_window window{*application, options};
+            FAIL("window construction should have thrown");
         } catch (const helios::error& failure) {
             CHECK(failure.code() == helios::wrong_thread);
             CHECK(failure.frame().context == "creating a window");

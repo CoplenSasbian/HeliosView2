@@ -1,16 +1,16 @@
-﻿#pragma once
+#pragma once
 
 // Public application interface.
 //
-// The class is a handle: the platform implementation lives in the DLL behind a
-// pimpl (helios::detail::app_impl), so this header stays small, the class layout
-// can change without touching call sites, and app::run/quit are plain calls
-// rather than virtual dispatch. What does stay virtual is the part that genuinely
-// has several implementations - the platform backend inside the DLL.
+// app is a handle: the platform implementation lives in the DLL behind a pimpl
+// (detail::app_impl), so this header carries declarations only. There is no
+// frozen ABI - the DLL and the application are built with the same compiler,
+// standard library and flags - but keeping the layout out of the header keeps
+// the interface small and lets the implementation evolve freely.
 //
-// Plain C++ on purpose: the DLL exports ordinary classes and functions, so the
-// headers and the binary are built together with the same compiler, standard
-// library and flags. Ship a binary per toolchain rather than freeze an ABI.
+// Windows are user derived classes (see Window.h); app is just the message loop
+// and the UI thread task queue, and registers windows for their lifetime
+// without owning them.
 
 #include <HeliosView2/Error.h>
 #include <HeliosView2/HeliosView2_export.h>
@@ -19,17 +19,13 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <utility>
 
 namespace helios {
 
-struct window_options;  // Window.h
 class base_window;
-class app;
 
 namespace detail {
 class app_impl;
-struct app_access;
 }  // namespace detail
 
 /// Options for creating an application.
@@ -42,8 +38,22 @@ struct app_options {
 
 class HELIOSVIEW2_EXPORT app {
 public:
+    /// Creates the app and binds it to the calling thread, which becomes the UI
+    /// thread. Throws helios::error with the full detail on failure.
+    ///
+    ///     helios::app application(helios::app_options{.id = "com.example.editor",
+    ///                                                .name = "Editor",
+    ///                                                .version = "0.1.0"});
+    explicit app(const app_options& options = {});
+
     app(const app&) = delete;
     app& operator=(const app&) = delete;
+
+    /// Moving transfers the platform application; the moved-from handle is
+    /// empty and can only be destroyed or assigned to.
+    app(app&& other) noexcept;
+    app& operator=(app&& other) noexcept;
+
     ~app();
 
     /// Runs the message loop on the calling thread until quit() is requested.
@@ -54,9 +64,6 @@ public:
     [[nodiscard]] bool is_running() const noexcept;
     [[nodiscard]] std::uint64_t ui_thread_id() const noexcept;
 
-    /// Creates a window; must be called on the UI thread.
-    std::shared_ptr<base_window> create_window(const window_options& options);
-
     [[nodiscard]] std::uint64_t window_count() const;
     void close_all_windows();
 
@@ -65,19 +72,11 @@ public:
     void post(std::function<void()> work, std::function<void(error)> on_failure = {});
 
 private:
-    friend struct detail::app_access;
+    friend class base_window;
 
-    explicit app(std::unique_ptr<detail::app_impl> impl) noexcept;
+    [[nodiscard]] detail::app_impl& impl() const;
 
     std::unique_ptr<detail::app_impl> m_impl;
 };
-
-/// Creates an application; throws helios::error with the full detail on failure.
-///
-///     auto application = helios::create_app({.id = "com.example.editor",
-///                                           .name = "Editor",
-///                                           .version = "0.1.0"});
-[[nodiscard]] HELIOSVIEW2_EXPORT std::unique_ptr<app> create_app(
-        const app_options& options);
 
 }  // namespace helios

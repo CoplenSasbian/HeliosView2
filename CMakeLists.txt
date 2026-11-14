@@ -35,9 +35,9 @@ include(HeliosExecution)
 include(HeliosJson)
 include(HeliosTests)
 
-# A shared library keeps the ABI boundary; a static one removes it entirely.
-# The wire format in include/HeliosView2/abi/ and the header-side C++ layer are
-# the same either way, so an application can start static and switch later.
+# A shared library is a module boundary, not an ABI contract; a static one
+# removes it entirely. The public headers are the same either way, so an
+# application can start static and switch later.
 option(HELIOS_BUILD_SHARED "Build ${PROJECT_NAME} as a shared library" ON)
 if(HELIOS_BUILD_SHARED)
     set(HELIOS_LIBRARY_TYPE SHARED)
@@ -45,31 +45,60 @@ else()
     set(HELIOS_LIBRARY_TYPE STATIC)
 endif()
 
-# Binary compatibility: the exported API is ordinary C++ (std::string, std::expected,
-# interface classes), so a binary only works with the exact headers, compiler and
-# flags it was built with. That is the intended trade: ship one binary per
-# toolchain instead of freezing an ABI. HELIOS_BUILD_SHARED=OFF removes the
-# boundary entirely by linking statically.
+# No frozen ABI: the exported API is ordinary C++ (std::string, helios::error,
+# classes with virtual functions such as base_window), so the headers and the
+# DLL are always built together with the same compiler, standard library and
+# flags. The delivered artifact is one binary per standard library version, not
+# one binary that every toolchain can load. That is what lets app be constructed
+# directly and lets base_window be derived by the application.
+# HELIOS_BUILD_SHARED=OFF removes the module boundary entirely.
 add_library(${PROJECT_NAME} ${HELIOS_LIBRARY_TYPE}
         src/${PROJECT_NAME}.cpp
         src/App.cpp
+        src/Window.cpp
+        src/WindowImpl.cpp
         src/Error.cpp
-        src/Log.cpp
-        src/abi/app_factory.cpp)
+        src/Log.cpp)
 
 if(NOT HELIOS_BUILD_SHARED)
     # Turns HELIOSVIEW2_EXPORT into nothing for every consumer of the headers.
     target_compile_definitions(${PROJECT_NAME} PUBLIC HELIOSVIEW2_STATIC_BUILD)
 endif()
 
-if(WIN32)
+# Windowing backend. The portable headers (App.h, Window.h, Event.h,
+# HandlerScanner.h) never mention a platform; everything OS specific lives in
+# one src/<backend>/ directory and one optional platform header. To add a
+# platform: create src/<backend>/, implement app and base_window there, then
+# extend the branches below.
+set(HELIOS_WINDOW_BACKEND "auto" CACHE STRING
+        "Windowing backend: auto (win32 on Windows, stub elsewhere), win32, stub")
+set_property(CACHE HELIOS_WINDOW_BACKEND PROPERTY STRINGS auto win32 stub)
+
+set(_helios_backend "${HELIOS_WINDOW_BACKEND}")
+if(_helios_backend STREQUAL "auto")
+    if(WIN32)
+        set(_helios_backend win32)
+    else()
+        set(_helios_backend stub)
+    endif()
+endif()
+
+if(_helios_backend STREQUAL "win32")
     target_sources(${PROJECT_NAME} PRIVATE
             src/win32/app_win32.cpp
             src/win32/window_win32.cpp)
     target_link_libraries(${PROJECT_NAME} PRIVATE user32 ole32)
+elseif(_helios_backend STREQUAL "stub")
+    target_sources(${PROJECT_NAME} PRIVATE
+            src/portable/app_stub.cpp
+            src/portable/window_stub.cpp)
 else()
-    target_sources(${PROJECT_NAME} PRIVATE src/portable/app_stub.cpp)
+    message(FATAL_ERROR
+            "${PROJECT_NAME}: unknown HELIOS_WINDOW_BACKEND '${HELIOS_WINDOW_BACKEND}'.\n"
+            "Use auto, win32 or stub, or add a branch for the new backend.")
 endif()
+
+message(STATUS "${PROJECT_NAME}: windowing backend '${_helios_backend}'")
 
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 

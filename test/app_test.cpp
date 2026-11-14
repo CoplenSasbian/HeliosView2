@@ -10,16 +10,40 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 #if defined(_WIN32)
-TEST_CASE("create_app returns a usable application") {
+TEST_CASE("an application can be constructed") {
     std::unique_ptr<helios::app> application = test_support::app();
     REQUIRE(application != nullptr);
 
     CHECK(application->ui_thread_id() != 0);
     CHECK_FALSE(application->is_running());
     CHECK(application->window_count() == 0);
+}
+
+TEST_CASE("an application is movable") {
+    static_assert(std::is_nothrow_move_constructible_v<helios::app>);
+    static_assert(std::is_nothrow_move_assignable_v<helios::app>);
+    static_assert(!std::is_copy_constructible_v<helios::app>);
+
+    std::unique_ptr<helios::app> original = test_support::app();
+
+    helios::app moved{std::move(*original)};
+    CHECK(moved.ui_thread_id() != 0);
+    CHECK(moved.window_count() == 0);
+
+    // The moved-from handle is empty: only destruction and assignment are
+    // valid, so operations report it instead of touching a null backend.
+    std::int32_t exit_code = -1;
+    CHECK_THROWS_AS(original->run(exit_code), helios::error);
+    CHECK_THROWS_AS(static_cast<void>(original->window_count()), helios::error);
+    CHECK_FALSE(original->is_running());
+
+    moved.post([&] { moved.quit(); });
+    CHECK_NOTHROW(moved.run(exit_code));
+    CHECK(exit_code == 0);
 }
 
 TEST_CASE("run exits when quit is called from another thread") {

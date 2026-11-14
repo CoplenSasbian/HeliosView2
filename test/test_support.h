@@ -1,7 +1,7 @@
 #pragma once
 
-// Helpers shared by the tests: a failing create throws, so the tests that expect
-// success simply call through.
+// Helpers shared by the tests: a failing construction throws, so the tests that
+// expect success simply construct through.
 
 #include <HeliosView2/App.h>
 #include <HeliosView2/Window.h>
@@ -12,12 +12,12 @@
 namespace test_support {
 
 inline std::unique_ptr<helios::app> app() {
-    return helios::create_app(helios::app_options{});
+    return std::make_unique<helios::app>();
 }
 
-inline std::shared_ptr<helios::base_window> window(helios::app& target,
+inline std::unique_ptr<helios::base_window> window(helios::app& target,
                                                    helios::window_options options = {}) {
-    return target.create_window(options);
+    return std::make_unique<helios::base_window>(target, options);
 }
 
 }  // namespace test_support

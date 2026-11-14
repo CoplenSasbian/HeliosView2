@@ -1,5 +1,7 @@
-﻿#include "../AppBackend.h"
-#include "win32_window.h"
+#include "../AppImpl.h"
+#include "../WindowImpl.h"
+
+#include <HeliosView2/App.h>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -10,10 +12,11 @@
 #include <windows.h>
 #include <objbase.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <deque>
 #include <exception>
 #include <functional>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -113,34 +116,39 @@ class win32_app_impl final : public app_impl {
 public:
     explicit win32_app_impl(const app_options& options)
         : m_thread_id(::GetCurrentThreadId()),
-          m_quit_on_last_window_closed(options.quit_on_last_window_closed),
-          m_id(options.id),
-          m_name(options.name),
-          m_version(options.version){
+          m_quit_on_last_window_closed(options.quit_on_last_window_closed) {
         set_dpi_awareness();
 
         const HRESULT result = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         if (FAILED(result)) {
-            m_init_error = make_error_text(
-                    platform_failure, "initialising COM on the UI thread",
-                    "CoInitializeEx failed" + hresult_text(result));
-            return;
+            throw make_error_text(platform_failure, "creating the application",
+                                  "CoInitializeEx failed" + hresult_text(result));
         }
-        m_com_initialized = true;
+        m_platform_initialized = true;
 
-        set_app_user_model_id(m_id);
+        set_app_user_model_id(options.id);
 
         MSG message{};
         ::PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
     }
 
     ~win32_app_impl() override {
-        close_all_windows();
-        discard_tasks();
-        if (m_com_initialized) ::CoUninitialize();
-    }
+        // Detach first: destroying a native window notifies the app, and the
+        // app is already going away.
+        std::vector<window_impl*> windows;
+        {
+            std::lock_guard lock(m_windows_mutex);
+            windows.swap(m_windows);
+        }
 
-    [[nodiscard]] const error& init_error() const noexcept { return m_init_error; }
+        for (window_impl* window : windows) {
+            window->detach_host();
+            window->destroy_native();
+        }
+
+        discard_tasks();
+        if (m_platform_initialized) ::CoUninitialize();
+    }
 
     void run(std::int32_t& exit_code) override {
         if (::GetCurrentThreadId() != m_thread_id) {
@@ -150,14 +158,14 @@ public:
         }
         if (m_started.exchange(true)) {
             throw make_error(invalid_state, "running the message loop",
-                                              "the message loop is already running");
+                             "the message loop is already running");
         }
 
         bool expected = false;
         if (!m_running.compare_exchange_strong(expected, true)) {
             m_stopped.store(true, std::memory_order_release);
             throw make_error(invalid_state, "running the message loop",
-                         "the message loop has already finished");
+                             "the message loop has already finished");
         }
 
         exit_code = 0;
@@ -177,9 +185,9 @@ public:
                 const auto native = static_cast<std::int32_t>(::GetLastError());
                 discard_tasks();
                 finish();
-                throw make_error_text(
-                        platform_failure, "pumping the message loop",
-                        "GetMessageW failed (error " + std::to_string(native) + ')');
+                throw make_error_text(platform_failure, "pumping the message loop",
+                                      "GetMessageW failed (error "
+                                              + std::to_string(native) + ')');
             }
             if (result == 0) {
                 exit_code = static_cast<std::int32_t>(message.wParam);
@@ -195,7 +203,6 @@ public:
 
         discard_tasks();
         finish();
-        return;
     }
 
     void quit() noexcept override {
@@ -205,73 +212,43 @@ public:
         }
     }
 
-    [[nodiscard]] bool is_running() const noexcept override {
+    bool is_running() const noexcept override {
         return m_running.load(std::memory_order_acquire);
     }
 
-    [[nodiscard]] std::uint64_t ui_thread_id() const noexcept override {
+    std::uint64_t ui_thread_id() const noexcept override {
         return static_cast<std::uint64_t>(m_thread_id);
     }
 
-    std::shared_ptr<base_window> create_window(const window_options& options) override {
-        if (::GetCurrentThreadId() != m_thread_id) {
-            throw make_error(wrong_thread, "creating a window",
-                                              "windows must be created on the UI thread");
-        }
-
-        auto backend = win32_window_impl::create(*this, options);
-        auto handle = app_access::make_window(std::move(backend));
-
-        {
-            std::lock_guard lock(m_windows_mutex);
-            m_windows.push_back(handle);
-        }
-        return handle;
-    }
-
-    [[nodiscard]] std::uint64_t window_count() const override {
+    std::uint64_t window_count() const override {
         std::lock_guard lock(m_windows_mutex);
         return static_cast<std::uint64_t>(m_windows.size());
     }
 
     void close_all_windows() override {
-        for (;;) {
-            std::shared_ptr<base_window> window;
-            {
-                std::lock_guard lock(m_windows_mutex);
-                if (m_windows.empty()) break;
-                window = m_windows.back();
-            }
+        // Work on a snapshot: a window destroyed by close() unregisters itself
+        // from the app, which would invalidate an iterator over the registry.
+        std::vector<window_impl*> windows;
+        {
+            std::lock_guard lock(m_windows_mutex);
+            windows.assign(m_windows.begin(), m_windows.end());
+        }
 
-            // close() destroys the native window on this thread, and
-            // window_destroyed() drops it from the list.
+        for (window_impl* window : windows) {
             try {
                 window->close();
-                continue;
             } catch (const error&) {
-            }
-
-            // It could not be closed: drop our reference and stop the backend
-            // from calling back into an app that is going away.
-            std::lock_guard lock(m_windows_mutex);
-            for (auto it = m_windows.begin(); it != m_windows.end(); ++it) {
-                if (it->get() == window.get()) {
-                    if (window_impl* backend = app_access::impl_of(*window)) backend->detach();
-                    m_windows.erase(it);
-                    break;
-                }
             }
         }
     }
 
-    void post(std::function<void()> work, std::function<void(error)> on_failure) override {
+    void post(std::function<void()> work,
+              std::function<void(error)> on_failure) override {
         if (!work) {
-            throw make_error(invalid_argument, "posting a task",
-                                              "the task is empty");
+            throw make_error(invalid_argument, "posting a task", "the task is empty");
         }
         if (m_stopped.load(std::memory_order_acquire)) {
-            throw make_error(invalid_state, "posting a task",
-                                              "the app has already stopped");
+            throw make_error(invalid_state, "posting a task", "the app has already stopped");
         }
 
         // A task runs later on the UI thread, so an exception has nobody to
@@ -300,25 +277,34 @@ public:
             m_tasks.push_back(std::move(item));
         } catch (...) {
             throw make_error(out_of_memory, "posting a task",
-                         "the task queue could not grow");
+                             "the task queue could not grow");
         }
 
         ::PostThreadMessageW(m_thread_id, kTaskMessage, 0, 0);
     }
 
-    void window_destroyed(window_impl& window) noexcept override {
-        // The handle keeps the window alive while this runs.
-        const std::shared_ptr<base_window> handle = window.lock_handle();
+    void add_window(window_impl& window) override {
+        std::lock_guard lock(m_windows_mutex);
+        try {
+            m_windows.push_back(&window);
+        } catch (...) {
+            throw make_error(out_of_memory, "creating a window",
+                             "the window registry could not grow");
+        }
+    }
 
+    void remove_window(window_impl& window) noexcept override {
+        std::lock_guard lock(m_windows_mutex);
+        const auto it = std::find(m_windows.begin(), m_windows.end(), &window);
+        if (it != m_windows.end()) m_windows.erase(it);
+    }
+
+    void window_destroyed(window_impl& window) noexcept override {
         bool empty = false;
         {
             std::lock_guard lock(m_windows_mutex);
-            for (auto it = m_windows.begin(); it != m_windows.end(); ++it) {
-                if (it->get() == handle.get()) {
-                    m_windows.erase(it);
-                    break;
-                }
-            }
+            const auto it = std::find(m_windows.begin(), m_windows.end(), &window);
+            if (it != m_windows.end()) m_windows.erase(it);
             empty = m_windows.empty();
         }
 
@@ -358,9 +344,8 @@ private:
     }
 
     DWORD m_thread_id{};
-    error m_init_error;
-    bool m_com_initialized{false};
     bool m_quit_on_last_window_closed{true};
+    bool m_platform_initialized{false};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_started{false};
     std::atomic<bool> m_stopped{false};
@@ -368,26 +353,20 @@ private:
     std::mutex m_tasks_mutex;
     std::deque<std::function<void()>> m_tasks;
     mutable std::mutex m_windows_mutex;
-    std::vector<std::shared_ptr<base_window>> m_windows;
-    std::string m_id;
-    std::string m_name;
-    std::string m_version;
+    std::vector<window_impl*> m_windows;
 };
 
-std::unique_ptr<app> create_platform_app(const app_options& options) {
+std::unique_ptr<app_impl> create_app_impl(const app_options& options) {
     try {
-        auto backend = std::unique_ptr<win32_app_impl>(new win32_app_impl(options));
-        if (backend->init_error().valid()) {
-            const error failure = backend->init_error();
-            throw failure;
-        }
-        return app_access::make_app(std::move(backend));
+        return std::make_unique<win32_app_impl>(options);
+    } catch (const error&) {
+        throw;
     } catch (const std::bad_alloc&) {
         throw make_error(out_of_memory, "creating the application",
-                                          "the app object could not be allocated");
+                         "the app object could not be allocated");
     } catch (const std::exception& failure) {
         throw make_error(out_of_memory, "creating the application", "{}",
-                                          failure.what());
+                         failure.what());
     }
 }
 

@@ -1,11 +1,17 @@
-#include <HeliosView2/App.h>
+#include "example_window.h"
+
 #include <HeliosView2/Error.h>
 #include <HeliosView2/Log.h>
-#include <HeliosView2/Window.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <memory>
+
+namespace {
+
+constexpr auto group_ref = helios::log::grp("main");
+
+}  // namespace
 
 int main(int argc, char** argv) {
     helios::log::set_level(helios::log::level::trace);
@@ -21,27 +27,28 @@ int main(int argc, char** argv) {
     }
 
     const bool smoke = argc > 1 && std::strcmp(argv[1], "--smoke") == 0;
-    constexpr auto group_ref = helios::log::grp("main");
 
     try {
         // A failing call throws with everything: what, where and why.
-        auto application = helios::create_app({
+        helios::app application(helios::app_options{
                 .id = "com.example.heliosview2.window",
                 .name = "HeliosView2 Window Example",
                 .version = "0.1.0",
         });
 
-        auto window = application->create_window({
-                .title = "HeliosView2 Window Example",
-                .width = 960,
-                .height = 600,
-                .visible = !smoke,
-        });
+        example_window window{application,
+                              {
+                                      .title = "HeliosView2 Window Example",
+                                      .width = 960,
+                                      .height = 600,
+                                      .visible = !smoke,
+                                      .centered = true,
+                              }};
 
-        if (smoke) window->close();
+        if (smoke) window.close();
 
         std::int32_t exit_code = 0;
-        application->run(exit_code);
+        application.run(exit_code);
 
         if (!smoke) group_ref.info("window example exited with code {}", exit_code);
         helios::log::flush();

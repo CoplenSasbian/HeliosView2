@@ -1,103 +1,53 @@
-﻿// The public handles: every method is a thin forward to the backend, which keeps
-// the headers free of platform details and the calls non-virtual.
+#include "AppImpl.h"
 
 #include <HeliosView2/App.h>
-#include <HeliosView2/Window.h>
 
-#include "AppBackend.h"
+#include <utility>
 
-namespace helios
-{
-    app::app(std::unique_ptr<detail::app_impl> impl) noexcept : m_impl(std::move(impl))
-    {
+namespace helios {
+
+app::app(const app_options& options) : m_impl(detail::create_app_impl(options)) {}
+
+app::app(app&& other) noexcept = default;
+
+app& app::operator=(app&& other) noexcept = default;
+
+app::~app() = default;
+
+detail::app_impl& app::impl() const {
+    if (!m_impl) {
+        throw make_error(invalid_state, "using the application",
+                         "the application has been moved from");
     }
+    return *m_impl;
+}
 
-    app::~app() = default;
+void app::run(std::int32_t& exit_code) {
+    impl().run(exit_code);
+}
 
-    void app::run(std::int32_t& exit_code)
-    {
-        m_impl->run(exit_code);
-    }
+void app::quit() noexcept {
+    if (m_impl) m_impl->quit();
+}
 
-    void app::quit() noexcept
-    {
-        m_impl->quit();
-    }
+bool app::is_running() const noexcept {
+    return m_impl && m_impl->is_running();
+}
 
-    bool app::is_running() const noexcept
-    {
-        return m_impl->is_running();
-    }
+std::uint64_t app::ui_thread_id() const noexcept {
+    return m_impl ? m_impl->ui_thread_id() : 0;
+}
 
-    std::uint64_t app::ui_thread_id() const noexcept
-    {
-        return m_impl->ui_thread_id();
-    }
+std::uint64_t app::window_count() const {
+    return impl().window_count();
+}
 
-    std::shared_ptr<base_window> app::create_window(const window_options& options)
-    {
-        return m_impl->create_window(options);
-    }
+void app::close_all_windows() {
+    impl().close_all_windows();
+}
 
-    std::uint64_t app::window_count() const
-    {
-        return m_impl->window_count();
-    }
+void app::post(std::function<void()> work, std::function<void(error)> on_failure) {
+    impl().post(std::move(work), std::move(on_failure));
+}
 
-    void app::close_all_windows()
-    {
-        m_impl->close_all_windows();
-    }
-
-    void app::post(std::function<void()> work, std::function<void(error)> on_failure)
-    {
-        m_impl->post(std::move(work), std::move(on_failure));
-    }
-
-    base_window::base_window(std::unique_ptr<detail::window_impl> impl) noexcept
-        : m_impl(std::move(impl))
-    {
-    }
-
-    base_window::~base_window() = default;
-
-    void base_window::show()
-    {
-        m_impl->show();
-    }
-
-    void base_window::hide()
-    {
-        m_impl->hide();
-    }
-
-    void base_window::close()
-    {
-        m_impl->close();
-    }
-
-    void base_window::set_title(std::string_view title)
-    {
-        m_impl->set_title(title);
-    }
-
-    void base_window::set_should_close(bool should_close)
-    {
-        m_impl->m_should_close = should_close;
-    }
-
-    bool base_window::should_close() const
-    {
-        return m_impl->m_should_close;
-    }
-
-    bool base_window::is_closed() const
-    {
-        return m_impl->is_closed();
-    }
-
-    void* base_window::native_handle() const
-    {
-        return m_impl->native_handle();
-    }
-} // namespace helios
+}  // namespace helios
